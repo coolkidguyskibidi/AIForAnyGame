@@ -1,0 +1,2981 @@
+--========================================
+-- [AI] ROBLOX GAME ASSISTANT - FIXED
+-- Local client script. Replace the API key placeholder before use.
+--========================================
+
+local API_KEY = "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"
+-- A hosted copy can stay key-free: the teleport bootstrap restores this local secret.
+pcall(function()
+    local shared = _G
+    if type(getgenv) == "function" then
+        local candidate = getgenv()
+        if type(candidate) == "table" then
+            shared = candidate
+        end
+    end
+    if type(shared.__ROBLOX_AI_GROQ_API_KEY) == "string"
+        and shared.__ROBLOX_AI_GROQ_API_KEY ~= "" then
+        API_KEY = shared.__ROBLOX_AI_GROQ_API_KEY
+    end
+end)
+local API_URL = "https://api.groq.com/openai/v1/chat/completions"
+local MODEL = "openai/gpt-oss-20b"
+
+-- Required for automatic reload after teleport: paste the RAW URL of this script here.
+-- Example format: https://raw.githubusercontent.com/USERNAME/REPOSITORY/branch/roblox_ai.lua
+-- Leave blank to disable queued autoload (rejoin/serverhop will still work).
+local AUTOLOAD_URL = ""
+local WHITELIST_FILE = "roblox_ai_whitelist.json"
+
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local TextChatService = game:GetService("TextChatService")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local ContentProvider = game:GetService("ContentProvider")
+local UserInputService = game:GetService("UserInputService")
+local TeleportService = game:GetService("TeleportService")
+
+local LocalPlayer = Players.LocalPlayer
+local OWNER_USERNAME = "gettingsniper53"
+
+-- R15 animation assets supplied by you.
+-- Backflip candidates are tried in this order. The named "Realistic Backflip"
+-- asset is first, followed by the two other copied animation IDs.
+local BACKFLIP_ANIMATION_IDS = {
+    "rbxassetid://97711384555145",
+    "rbxassetid://14366558676",
+    "rbxassetid://10921259953"
+}
+local FLOAT_ANIMATION_ID = "rbxassetid://123178564946946"
+-- Roblox's default free R15 emote animations (the same assets used by /e dance and /e dance2).
+local DANCE_ANIMATION_IDS = {
+    [1] = "rbxassetid://507771019", -- /e dance
+    [2] = "rbxassetid://507776043"  -- /e dance2
+}
+
+if not LocalPlayer then
+    warn("[AI] LocalPlayer is unavailable. Run this from a client context.")
+    return
+end
+
+math.randomseed(math.floor(os.clock() * 1000000) % 2147483647)
+
+--========================================
+-- SMALL HELPERS
+--========================================
+
+local function Trim(value)
+    return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+-- Use direct array assignment instead of table.insert. Some client runtimes
+-- expose a table.insert variant that requires an explicit numeric position,
+-- which caused the SplitChatReply error shown in the Developer Console.
+local function Append(array, value)
+    array[#array + 1] = value
+end
+
+local function SafeLower(value)
+    return tostring(value or ""):lower()
+end
+
+local function GetPlayerName(player)
+    if not player then
+        return "Player"
+    end
+    return player.DisplayName or player.Name or "Player"
+end
+
+--========================================
+-- HTTP REQUEST FUNCTION
+--========================================
+
+local httpRequest = nil
+
+pcall(function()
+    if type(request) == "function" then
+        httpRequest = request
+    elseif type(http_request) == "function" then
+        httpRequest = http_request
+    elseif type(syn) == "table" and type(syn.request) == "function" then
+        httpRequest = syn.request
+    elseif type(http) == "table" and type(http.request) == "function" then
+        httpRequest = http.request
+    end
+end)
+
+-- Queue a small bootstrap so the script can reload after Roblox teleports.
+-- Most executors require the script to be hosted at a raw HTTP(S) URL.
+local function QueueScriptAutoload()
+    local url = Trim(AUTOLOAD_URL)
+    if url == "" then
+        return false, "AUTOLOAD_URL is blank; add the raw hosted script URL at the top of the file"
+    end
+    if not url:match("^https?://") then
+        return false, "AUTOLOAD_URL must start with http:// or https://"
+    end
+
+    local queueFunction = nil
+    pcall(function()
+        if type(queue_on_teleport) == "function" then
+            queueFunction = queue_on_teleport
+        elseif type(queueonteleport) == "function" then
+            queueFunction = queueonteleport
+        elseif type(syn) == "table" and type(syn.queue_on_teleport) == "function" then
+            queueFunction = syn.queue_on_teleport
+        elseif type(fluxus) == "table" and type(fluxus.queue_on_teleport) == "function" then
+            queueFunction = fluxus.queue_on_teleport
+        end
+    end)
+
+    if type(queueFunction) ~= "function" then
+        return false, "this executor does not expose queue_on_teleport"
+    end
+
+    local bootstrap = string.format([=[
+task.wait(2)
+local url = %q
+local shared = _G
+pcall(function()
+    if type(getgenv) == "function" then
+        local candidate = getgenv()
+        if type(candidate) == "table" then
+            shared = candidate
+        end
+    end
+end)
+shared.__ROBLOX_AI_GROQ_API_KEY = %q
+local getOK, source = pcall(function()
+    return game:HttpGet(url)
+end)
+if not getOK or type(source) ~= "string" or source == "" then
+    warn("[AI] Autoload download failed: " .. tostring(source))
+    return
+end
+if type(loadstring) ~= "function" then
+    warn("[AI] Autoload failed: loadstring is unavailable")
+    return
+end
+local compiled, compileError = loadstring(source)
+if not compiled then
+    warn("[AI] Autoload compile failed: " .. tostring(compileError))
+    return
+end
+local runOK, runError = pcall(compiled)
+if not runOK then
+    warn("[AI] Autoload execution failed: " .. tostring(runError))
+end
+]=], url, API_KEY)
+
+    local queueOK, queueError = pcall(queueFunction, bootstrap)
+    if not queueOK then
+        return false, "queue_on_teleport failed: " .. tostring(queueError)
+    end
+    return true
+end
+
+--========================================
+-- CHAT CHANNEL
+--========================================
+
+local channels = TextChatService:WaitForChild("TextChannels", 10)
+local chatChannel = nil
+
+if channels then
+    chatChannel = channels:FindFirstChild("RBXGeneral")
+        or channels:FindFirstChildWhichIsA("TextChannel")
+end
+
+local function GetChatChannel()
+    if chatChannel and chatChannel.Parent then
+        return chatChannel
+    end
+
+    local currentChannels = TextChatService:FindFirstChild("TextChannels")
+    if not currentChannels then
+        return nil
+    end
+
+    chatChannel = currentChannels:FindFirstChild("RBXGeneral")
+        or currentChannels:FindFirstChildWhichIsA("TextChannel")
+
+    return chatChannel
+end
+
+--========================================
+-- SETTINGS / STATE
+--========================================
+
+local Whitelist = {}
+
+local function GetSharedEnvironment()
+    local shared = nil
+    pcall(function()
+        if type(getgenv) == "function" then
+            shared = getgenv()
+        end
+    end)
+    if type(shared) == "table" then
+        return shared
+    end
+    return _G
+end
+
+local function MergeWhitelistData(data)
+    if type(data) ~= "table" then
+        return
+    end
+    for key, value in pairs(data) do
+        if type(key) == "string" and value == true then
+            Whitelist[key] = true
+        end
+    end
+end
+
+local function LoadWhitelistData()
+    local shared = GetSharedEnvironment()
+    if type(shared.__ROBLOX_AI_WHITELIST) == "table" then
+        MergeWhitelistData(shared.__ROBLOX_AI_WHITELIST)
+    end
+
+    if type(readfile) == "function" then
+        local readOK, raw = pcall(function()
+            if type(isfile) == "function" and not isfile(WHITELIST_FILE) then
+                return nil
+            end
+            return readfile(WHITELIST_FILE)
+        end)
+        if readOK and type(raw) == "string" and raw ~= "" then
+            local decodeOK, saved = pcall(function()
+                return HttpService:JSONDecode(raw)
+            end)
+            if decodeOK then
+                MergeWhitelistData(saved)
+            end
+        end
+    end
+
+    shared.__ROBLOX_AI_WHITELIST = Whitelist
+end
+
+local function SaveWhitelistData()
+    local shared = GetSharedEnvironment()
+    shared.__ROBLOX_AI_WHITELIST = Whitelist
+
+    if type(writefile) == "function" then
+        local saveOK, saveError = pcall(function()
+            writefile(WHITELIST_FILE, HttpService:JSONEncode(Whitelist))
+        end)
+        if not saveOK then
+            warn("[AI] Could not save whitelist file: " .. tostring(saveError))
+        end
+    end
+end
+
+LoadWhitelistData()
+
+local movementActive = false
+local movementMode = "none"
+local movementToken = 0
+local activeWorldDirection = Vector3.zero
+local movementBound = false
+local MOVEMENT_BIND = "AI_FIXED_MOVEMENT_CONTROLLER"
+
+-- Orbit mode teleports the local character around a selected player each frame.
+local orbitTargetPlayer = nil
+local ORBIT_RADIUS = 7
+-- 120 degrees/second keeps roughly the same default pace as the old 0.9 movement multiplier.
+local ORBIT_DEFAULT_SPEED = 120
+local ORBIT_MIN_SPEED = 1
+local ORBIT_MAX_SPEED = 720
+local orbitSpeedDegrees = ORBIT_DEFAULT_SPEED
+local orbitAngle = 0
+local orbitHeightOffset = 0
+local orbitStopQueued = false
+
+local spinActive = false
+local spinConnection = nil
+
+local touchConnection = nil
+local lastHitTime = 0
+local HIT_COOLDOWN = 4
+
+local currentGoal = "Explore the area."
+
+local cameraSaved = false
+local savedCameraType = nil
+local savedCameraSubject = nil
+local savedAutoRotate = nil
+local cameraReady = false
+
+local requestQueue = {}
+local queueRunning = false
+local MAX_QUEUE = 8
+
+local recentlyHandled = {}
+
+local activeAnimationTrack = nil
+local activeAnimationObject = nil
+local activeAnimationName = nil
+
+-- Local flight controller and touch controls.
+local flyActive = false
+local flyVelocity = nil
+local flyGyro = nil
+local flyConnection = nil
+local flyInputBeganConnection = nil
+local flyInputEndedConnection = nil
+local flyGui = nil
+local flyAscendHeld = false
+local flyDescendHeld = false
+local FLY_SPEED = 55
+
+-- Local-only player ESP. These instances are created on this client and are
+-- not replicated as game changes to other players.
+local espActive = false
+local espObjects = {}
+local espPlayerConnections = {}
+local espAddedConnection = nil
+local espRemovingConnection = nil
+local teleportPending = false
+
+-- Chat relay: selected player's public messages are re-sent by the owner
+-- with a clear source label, so they are not mistaken for the owner's own words.
+local copiedChatTarget = nil
+local copiedChatSeen = {}
+local copiedChatQueue = {}
+local copiedChatQueueHead = 1
+local copiedChatQueueTail = 0
+local copiedChatQueueRunning = false
+local COPIED_CHAT_SEND_DELAY = 1.1
+local COPIED_CHAT_MAX_QUEUE = 20
+local COPIED_CHAT_MAX_MESSAGE_LENGTH = 180
+
+-- Forward declarations used by movement/animation commands.
+local StopMovement
+local StopSpin
+local StopFly
+
+--========================================
+-- AI OUTPUT
+--========================================
+
+local CHAT_PREFIX = "[AI]: "
+local CHAT_CHUNK_LENGTH = 170 -- Leaves room for the prefix under Roblox chat limits.
+local CHAT_CHUNK_DELAY = 1.05 -- Avoid sending long answers as a rapid burst.
+
+local function SplitChatReply(text)
+    local chunks = {}
+    local remaining = Trim(text)
+
+    while #remaining > CHAT_CHUNK_LENGTH do
+        local candidate = remaining:sub(1, CHAT_CHUNK_LENGTH)
+        local splitAt = candidate:match(".*()%s")
+
+        if splitAt and splitAt > 1 then
+            Append(chunks, Trim(remaining:sub(1, splitAt - 1)))
+            remaining = Trim(remaining:sub(splitAt + 1))
+        else
+            -- Extremely long single words are split as a last resort.
+            Append(chunks, candidate)
+            remaining = Trim(remaining:sub(CHAT_CHUNK_LENGTH + 1))
+        end
+    end
+
+    if remaining ~= "" then
+        Append(chunks, remaining)
+    end
+
+    return chunks
+end
+
+local function SendAI(answer)
+    local clean = Trim(answer)
+    clean = clean:gsub("[%c]", " ")
+    clean = clean:gsub("%s+", " ")
+
+    if clean == "" then
+        clean = "I didn't get a clear answer."
+    end
+
+    local chunks = SplitChatReply(clean)
+    local channel = GetChatChannel()
+    local allSent = true
+
+    for index, chunk in ipairs(chunks) do
+        local output = CHAT_PREFIX .. chunk
+        local sent = false
+
+        if channel then
+            local sendOK, sendError = pcall(function()
+                channel:SendAsync(output)
+            end)
+            sent = sendOK
+
+            if not sendOK then
+                warn("[AI] SendAsync failed: " .. tostring(sendError):sub(1, 160))
+                local displayed = pcall(function()
+                    channel:DisplaySystemMessage(output)
+                end)
+                if not displayed then
+                    warn("[AI] Could not display reply chunk: " .. output)
+                end
+            end
+        else
+            warn("[AI] No usable chat channel. Reply: " .. output)
+        end
+
+        if not sent then
+            allSent = false
+        end
+
+        if index < #chunks then
+            task.wait(CHAT_CHUNK_DELAY)
+            channel = GetChatChannel()
+        end
+    end
+
+    return allSent
+end
+
+--========================================
+-- CHARACTER HELPERS
+--========================================
+
+local function GetCharacterParts(player)
+    player = player or LocalPlayer
+    local character = player and player.Character
+    if not character then
+        return nil, nil, nil
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
+    return character, humanoid, root
+end
+
+--========================================
+-- CUSTOM R15 ANIMATIONS
+--========================================
+
+local function StopCustomAnimation()
+    local oldTrack = activeAnimationTrack
+    local oldAnimation = activeAnimationObject
+
+    activeAnimationTrack = nil
+    activeAnimationObject = nil
+    activeAnimationName = nil
+
+    if oldTrack then
+        pcall(function()
+            oldTrack:Stop(0.15)
+        end)
+        task.delay(0.25, function()
+            pcall(function()
+                oldTrack:Destroy()
+            end)
+        end)
+    end
+
+    if oldAnimation then
+        pcall(function()
+            oldAnimation:Destroy()
+        end)
+    end
+end
+
+local function PlayR15Animation(animationName, animationIds, shouldLoop)
+    local _, humanoid = GetCharacterParts(LocalPlayer)
+    if not humanoid or humanoid.Health <= 0 then
+        SendAI("I can't play that animation right now.")
+        return false
+    end
+
+    if humanoid.RigType ~= Enum.HumanoidRigType.R15 then
+        SendAI("That animation requires an R15 avatar.")
+        return false
+    end
+
+    -- Roblox must have replicated the Animator from the server for animation
+    -- playback to replicate correctly to other clients.
+    local animator = humanoid:FindFirstChildOfClass("Animator")
+    if not animator then
+        animator = humanoid:WaitForChild("Animator", 5)
+    end
+
+    if not animator or not animator:IsA("Animator") then
+        SendAI("I couldn't find the character's Animator. Respawn and try again.")
+        warn("[AI] Animator missing from the current Humanoid.")
+        return false
+    end
+
+    local candidates = type(animationIds) == "table" and animationIds or { animationIds }
+    StopCustomAnimation()
+
+    local failures = {}
+
+    for _, animationId in ipairs(candidates) do
+        local animation = Instance.new("Animation")
+        animation.AnimationId = animationId
+
+        -- PreloadAsync can identify assets Roblox cannot fetch (for example,
+        -- private, deleted, or otherwise unavailable animation assets).
+        local fetchStatus = nil
+        local preloadOK, preloadError = pcall(function()
+            ContentProvider:PreloadAsync({ animation }, function(_, status)
+                fetchStatus = status
+            end)
+        end)
+
+        local statusIsSuccess = fetchStatus == nil
+            or fetchStatus == Enum.AssetFetchStatus.Success
+
+        if not preloadOK or not statusIsSuccess then
+            Append(failures, animationId .. " (asset fetch failed: "
+                .. tostring(fetchStatus or preloadError) .. ")")
+            animation:Destroy()
+        else
+            local loadOK, trackOrError = pcall(function()
+                return animator:LoadAnimation(animation)
+            end)
+
+            if not loadOK or not trackOrError then
+                Append(failures, animationId .. " (load failed: " .. tostring(trackOrError) .. ")")
+                animation:Destroy()
+            else
+                local track = trackOrError
+                track.Priority = Enum.AnimationPriority.Action
+                track.Looped = shouldLoop == true
+
+                track.Stopped:Connect(function()
+                    if activeAnimationTrack == track then
+                        activeAnimationTrack = nil
+                        activeAnimationName = nil
+                        activeAnimationObject = nil
+                        task.delay(0.15, function()
+                            pcall(function()
+                                track:Destroy()
+                            end)
+                            pcall(function()
+                                animation:Destroy()
+                            end)
+                        end)
+                    end
+                end)
+
+                local playOK, playError = pcall(function()
+                    track:Play(0.12, 1, 1)
+                end)
+
+                if playOK then
+                    activeAnimationTrack = track
+                    activeAnimationObject = animation
+                    activeAnimationName = animationName
+
+                    SendAI(animationName .. (shouldLoop and " animation on." or " animation playing."))
+                    print("[AI] Playing " .. animationName .. " using " .. animationId)
+                    return true
+                else
+                    Append(failures, animationId .. " (play failed: " .. tostring(playError) .. ")")
+                    pcall(function()
+                        track:Stop(0)
+                        track:Destroy()
+                    end)
+                    animation:Destroy()
+                end
+            end
+        end
+    end
+
+    for _, failure in ipairs(failures) do
+        warn("[AI] " .. animationName .. " candidate failed: " .. failure)
+    end
+    SendAI("I couldn't play the " .. animationName .. " animation. All supplied IDs failed to load; check asset permissions and Output.")
+    return false
+end
+
+local function StartBackflip()
+    StopFly()
+    StopMovement()
+    StopSpin()
+    StopCustomAnimation()
+    PlayR15Animation("Backflip", BACKFLIP_ANIMATION_IDS, false)
+end
+
+local function StartFloat()
+    StopFly()
+    StopMovement()
+    StopSpin()
+    PlayR15Animation("Float", FLOAT_ANIMATION_ID, true)
+end
+
+local function StartDance(danceNumber)
+    -- Use Roblox's free default R15 dance emote animation, not the custom Float ID.
+    local variant = tonumber(danceNumber) or 1
+    if variant ~= 1 and variant ~= 2 then
+        SendAI("Use /ai dance or /ai dance 2.")
+        return
+    end
+
+    StopFly()
+    StopMovement()
+    StopSpin()
+    PlayR15Animation(variant == 2 and "Dance 2" or "Dance", DANCE_ANIMATION_IDS[variant], true)
+end
+
+--========================================
+-- GROQ REQUEST
+--========================================
+
+local function GroqRequest(messages, maxTokens)
+    if type(httpRequest) ~= "function" then
+        error("This executor does not provide an HTTP request function.")
+    end
+
+    if API_KEY == "" or API_KEY == "YOUR_NEW_GROQ_API_KEY_HERE" then
+        error("Add your fresh Groq API key in the API_KEY line.")
+    end
+
+    local body = {
+        model = MODEL,
+        messages = messages,
+        max_completion_tokens = maxTokens or 180,
+        reasoning_effort = "low",
+        stream = false
+    }
+
+    local requestData = {
+        Url = API_URL,
+        URL = API_URL,
+        Method = "POST",
+        Headers = {
+            ["Content-Type"] = "application/json",
+            ["Authorization"] = "Bearer " .. API_KEY
+        },
+        Body = HttpService:JSONEncode(body)
+    }
+
+    local requestOK, response = pcall(function()
+        return httpRequest(requestData)
+    end)
+
+    if not requestOK then
+        error("HTTP request failed: " .. tostring(response):sub(1, 140))
+    end
+
+    if type(response) ~= "table" then
+        error("HTTP returned no response object.")
+    end
+
+    local responseBody = response.Body or response.body or response.ResponseBody
+    local statusCode = tonumber(response.StatusCode or response.status_code or response.Status)
+
+    if type(responseBody) ~= "string" or responseBody == "" then
+        error("Groq returned an empty response body. HTTP status: " .. tostring(statusCode or "unknown"))
+    end
+
+    if statusCode and statusCode >= 400 then
+        local shortBody = responseBody:gsub("[%c]", " "):sub(1, 180)
+        error("Groq HTTP " .. tostring(statusCode) .. ": " .. shortBody)
+    end
+
+    local decodeOK, data = pcall(function()
+        return HttpService:JSONDecode(responseBody)
+    end)
+
+    if not decodeOK or type(data) ~= "table" then
+        error("Groq returned invalid JSON.")
+    end
+
+    if data.error then
+        local message = data.error.message or data.error.code or "Unknown Groq API error"
+        error("Groq API: " .. tostring(message):sub(1, 160))
+    end
+
+    local choice = data.choices and data.choices[1]
+    local message = choice and choice.message
+    local content = message and message.content
+    local finishReason = choice and choice.finish_reason or nil
+
+    if type(content) == "table" then
+        local parts = {}
+        for _, part in ipairs(content) do
+            if type(part) == "table" and type(part.text) == "string" then
+                Append(parts, part.text)
+            end
+        end
+        content = table.concat(parts, " ")
+    end
+
+    content = Trim(content)
+    if content == "" then
+        error("Groq returned an empty answer.")
+    end
+
+    return content, finishReason
+end
+
+--========================================
+-- ON-DEMAND GAME AWARENESS
+--========================================
+
+local function HasAny(text, words)
+    for _, word in ipairs(words) do
+        if text:find(word, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function GetCharacterSnapshot(character, player, question)
+    if not character then
+        return nil
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
+    local rig = humanoid and tostring(humanoid.RigType) or "unknown rig"
+    local label = player and (player.DisplayName .. " (Username: " .. player.Name .. ")") or character.Name
+    local details = { "Character: " .. label, "Rig: " .. rig }
+
+    local wantsAvatarDetails = HasAny(question, {
+        "avatar", "character", "outfit", "wearing", "skin", "accessor", "how do i look", "how does"
+    })
+    local wantsHealth = HasAny(question, { "health", " hp", "hp?", "hit points" })
+    local wantsPosition = HasAny(question, {
+        "coordinate", "position", "where am i", "where is my", "location", "coordinates"
+    })
+    local wantsTools = HasAny(question, {
+        "tool", "tools", "inventory", "backpack", "equipped", "holding", "carrying", "equipment"
+    })
+
+    if wantsAvatarDetails then
+        local visibleItems = {}
+        for _, child in ipairs(character:GetChildren()) do
+            if child:IsA("Accessory") then
+                Append(visibleItems, child.Name)
+            elseif child:IsA("Shirt") or child:IsA("Pants") or child:IsA("ShirtGraphic") or child:IsA("BodyColors") then
+                Append(visibleItems, child.ClassName)
+            end
+            if #visibleItems >= 8 then
+                break
+            end
+        end
+        if #visibleItems > 0 then
+            Append(details, "Visible avatar items: " .. table.concat(visibleItems, ", "))
+        else
+            Append(details, "Visible avatar items: none identified")
+        end
+    end
+
+    if wantsTools then
+        local toolNames = {}
+        local equippedNames = {}
+
+        for _, child in ipairs(character:GetChildren()) do
+            if child:IsA("Tool") then
+                Append(toolNames, child.Name)
+                Append(equippedNames, child.Name)
+            end
+        end
+
+        if player then
+            local backpack = player:FindFirstChildOfClass("Backpack")
+            if backpack then
+                for _, child in ipairs(backpack:GetChildren()) do
+                    if child:IsA("Tool") then
+                        Append(toolNames, child.Name)
+                    end
+                end
+            end
+        end
+
+        Append(details, "Equipped tools: " .. (#equippedNames > 0 and table.concat(equippedNames, ", ") or "none"))
+        Append(details, "Tools in inventory: " .. (#toolNames > 0 and table.concat(toolNames, ", ") or "none detected"))
+    end
+
+    -- Health and coordinates are added only when the player explicitly asks for them.
+    if wantsHealth and humanoid then
+        Append(details, string.format("Health: %.0f/%.0f", humanoid.Health, humanoid.MaxHealth))
+    end
+    if wantsPosition and root then
+        Append(details, string.format("Position: %.1f, %.1f, %.1f", root.Position.X, root.Position.Y, root.Position.Z))
+    end
+
+    return table.concat(details, "\n")
+end
+
+local function BuildAwarenessContext(question, speaker)
+    -- Camera awareness is only valid for the local player. Never attach the
+    -- owner's camera view to another whitelisted speaker's question.
+    if speaker ~= LocalPlayer then
+        return nil
+    end
+
+    local q = SafeLower(question)
+    local asksSelfAvatar = HasAny(q, {
+        "my avatar", "my character", "my outfit", "my skin", "what am i wearing", "how do i look",
+        "my health", "my hp", "my position", "where am i", "my coordinates", "my location",
+        "my tools", "my inventory", "my backpack", "what am i holding", "what am i carrying"
+    })
+    local asksTools = HasAny(q, {
+        "my tool", "my tools", "what tool", "which tool", "what am i holding", "what am i carrying",
+        "my inventory", "my backpack", "what do i have equipped", "what is equipped", "what's equipped"
+    })
+    local asksAvatar = HasAny(q, { "avatar", "character", "outfit", "wearing", "accessor", "skin" })
+    local asksPlayer = HasAny(q, {
+        "player", "who is", "who's", "who am i looking at", "who am i facing",
+        "that person", "that guy", "that girl"
+    })
+    local asksLook = HasAny(q, {
+        "looking at", "look at", "what do i see", "what am i seeing", "what is this",
+        "what's this", "what is that", "what's that", "in front of me", "the thing i'm looking",
+        "what tool is this", "what tool is that", "identify this object", "identify this item"
+    })
+    local asksObject = HasAny(q, {
+        "object", "item", "npc", "building", "block", "map", "area", "environment", "game world"
+    }) or asksLook
+    local asksGame = HasAny(q, { "this game", "the map", "this map", "this area", "game world", "environment" })
+    local wantsPosition = HasAny(q, { "coordinate", "position", "where am i", "location" })
+    local wantsHealth = HasAny(q, { "health", " hp", "hp?", "hit points" })
+
+    if not (asksSelfAvatar or asksAvatar or asksTools or asksPlayer or asksObject or asksGame or wantsPosition or wantsHealth) then
+        return nil
+    end
+
+    local context = {}
+    if asksGame then
+        Append(context, "Experience PlaceId: " .. tostring(game.PlaceId))
+    end
+
+    local characterToDescribe = nil
+    local playerToDescribe = nil
+    if asksSelfAvatar or asksTools or ((wantsPosition or wantsHealth) and not asksPlayer) then
+        characterToDescribe = LocalPlayer.Character
+        playerToDescribe = LocalPlayer
+    end
+
+    if asksObject or asksPlayer or asksGame or (asksAvatar and not asksSelfAvatar) then
+        local camera = Workspace.CurrentCamera
+        if camera then
+            local viewport = camera.ViewportSize
+            local ray = camera:ViewportPointToRay(viewport.X / 2, viewport.Y / 2)
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = LocalPlayer.Character and { LocalPlayer.Character } or {}
+            params.IgnoreWater = true
+
+            local result = Workspace:Raycast(ray.Origin, ray.Direction * 500, params)
+            if result and result.Instance then
+                local hit = result.Instance
+                local model = hit:FindFirstAncestorOfClass("Model")
+                local hitHumanoid = model and model:FindFirstChildOfClass("Humanoid")
+                local hitPlayer = model and Players:GetPlayerFromCharacter(model)
+
+                if hitHumanoid and (asksPlayer or asksAvatar or asksLook) then
+                    characterToDescribe = model
+                    playerToDescribe = hitPlayer
+                    Append(context, "Object under the center of the player's screen: character " .. (hitPlayer and hitPlayer.DisplayName or model.Name))
+                elseif asksObject then
+                    local objectName = model and model.Name or hit.Name
+                    Append(context, "Object under the center of the player's screen: " .. objectName
+                        .. "; hit part: " .. hit.Name
+                        .. "; class: " .. hit.ClassName
+                        .. "; material: " .. tostring(hit.Material))
+                    if hitHumanoid then
+                        characterToDescribe = model
+                        playerToDescribe = hitPlayer
+                    end
+                end
+            elseif asksObject or asksLook then
+                Append(context, "The center of the player's screen is not currently pointing at a detectable object.")
+            end
+        end
+    end
+
+    if characterToDescribe then
+        local snapshot = GetCharacterSnapshot(characterToDescribe, playerToDescribe, q)
+        if snapshot then
+            Append(context, snapshot)
+        end
+    elseif asksSelfAvatar then
+        Append(context, "The local player's character is not currently loaded.")
+    end
+
+    if #context == 0 then
+        return nil
+    end
+    return table.concat(context, "\n")
+end
+
+--========================================
+-- NORMAL CONVERSATION
+--========================================
+
+local function AskAI(question, speaker)
+    local awarenessContext = BuildAwarenessContext(question, speaker)
+    local messages = {
+        {
+            role = "system",
+            content = ([[You are [AI], a friendly Roblox game assistant.
+Answer the player's actual question naturally and directly.
+DEFAULT TO SHORT, NATURAL CHAT REPLIES: usually one sentence, and at most two short sentences.
+Do not give long explanations, lists, or paragraphs for simple questions.
+ONLY give a longer answer when the player explicitly asks for details, asks you to explain something, or the topic genuinely needs multiple steps to be understood.
+When a longer answer is useful, organize it clearly and include only relevant details.
+Do not randomly mention commands, movement, autopilot, exploration, spin, dance, backflip, float, or orbit.
+Do not volunteer coordinates, health, player statistics, or a list of nearby objects. Only discuss those details when the player explicitly asks.
+Use live game context only when it directly answers the player's question. Never dump the context, describe unrelated objects, or guess details that are not provided.
+Only discuss game controls when the player asks about them.
+Do not repeat the question or list unrelated information.
+If you do not know something, say so clearly.]]
+            .. (awarenessContext
+                and "\n\nLIVE GAME CONTEXT (use only if relevant; do not volunteer unrelated stats):\n" .. awarenessContext
+                or ""))
+        },
+        {
+            role = "user",
+            content = GetPlayerName(speaker) .. ": " .. question
+        }
+    }
+
+    local answerParts = {}
+    local maxContinuations = 3
+
+    for attempt = 1, maxContinuations + 1 do
+        local part, finishReason = GroqRequest(messages, 450)
+        Append(answerParts, part)
+        Append(messages, { role = "assistant", content = part })
+
+        if finishReason ~= "length" or attempt > maxContinuations then
+            break
+        end
+
+        Append(messages, {
+            role = "user",
+            content = "Continue exactly where your previous answer stopped. Do not repeat any earlier text. Finish the answer."
+        })
+    end
+
+    return table.concat(answerParts, " ")
+end
+
+--========================================
+-- QUESTION QUEUE
+--========================================
+
+local function StartQuestionWorker()
+    if queueRunning then
+        return
+    end
+
+    queueRunning = true
+
+    task.spawn(function()
+        while #requestQueue > 0 do
+            local item = table.remove(requestQueue, 1)
+            local success, result = pcall(AskAI, item.question, item.speaker)
+
+            if success then
+                SendAI(result)
+            else
+                local problem = tostring(result)
+                warn("[AI] Groq request failed: " .. problem)
+                if problem:find("API key", 1, true) then
+                    SendAI("My Groq key is not configured.")
+                elseif problem:find("HTTP", 1, true) then
+                    SendAI("Groq request failed. Check the API key, quota, or model response.")
+                elseif problem:find("HTTP request function", 1, true) then
+                    SendAI("This executor does not support the HTTP request needed for Groq.")
+                else
+                    SendAI("My reply failed. Check the executor console for the error.")
+                end
+            end
+
+            task.wait(0.1)
+        end
+
+        queueRunning = false
+
+        if #requestQueue > 0 then
+            StartQuestionWorker()
+        end
+    end)
+end
+
+local function QueueQuestion(question, speaker)
+    if #requestQueue >= MAX_QUEUE then
+        SendAI("My question queue is full. Try again in a moment.")
+        return
+    end
+
+    Append(requestQueue, {
+        question = question,
+        speaker = speaker
+    })
+
+    StartQuestionWorker()
+end
+
+--========================================
+-- CAMERA CONTROL
+--========================================
+
+local function TakeCameraControl()
+    local camera = Workspace.CurrentCamera
+    local _, humanoid = GetCharacterParts(LocalPlayer)
+
+    if not camera then
+        return
+    end
+
+    if not cameraSaved then
+        savedCameraType = camera.CameraType
+        savedCameraSubject = camera.CameraSubject
+        savedAutoRotate = humanoid and humanoid.AutoRotate or nil
+        cameraSaved = true
+    end
+
+    camera.CameraType = Enum.CameraType.Scriptable
+    cameraReady = false
+end
+
+local function UpdateCamera(dt)
+    local camera = Workspace.CurrentCamera
+    local _, humanoid, root = GetCharacterParts(LocalPlayer)
+
+    if not camera or not humanoid or not root then
+        return
+    end
+
+    camera.CameraType = Enum.CameraType.Scriptable
+
+    local forward = root.CFrame.LookVector
+    local target = root.Position + Vector3.new(0, 2, 0)
+    local cameraPosition = root.Position - forward * 11 + Vector3.new(0, 5, 0)
+    local desired = CFrame.lookAt(cameraPosition, target)
+
+    if not cameraReady then
+        camera.CFrame = desired
+        cameraReady = true
+    else
+        local alpha = 1 - math.exp(-math.max(dt, 0) * 9)
+        camera.CFrame = camera.CFrame:Lerp(desired, alpha)
+    end
+
+    camera.Focus = CFrame.new(target)
+end
+
+local function RestoreCamera()
+    local camera = Workspace.CurrentCamera
+    local _, humanoid = GetCharacterParts(LocalPlayer)
+
+    if camera and cameraSaved then
+        if savedCameraType then
+            camera.CameraType = savedCameraType
+        else
+            camera.CameraType = Enum.CameraType.Custom
+        end
+
+        if savedCameraSubject and savedCameraSubject.Parent then
+            camera.CameraSubject = savedCameraSubject
+        elseif humanoid then
+            camera.CameraSubject = humanoid
+        end
+    end
+
+    if humanoid and savedAutoRotate ~= nil then
+        humanoid.AutoRotate = savedAutoRotate
+    end
+
+    cameraSaved = false
+    savedCameraType = nil
+    savedCameraSubject = nil
+    savedAutoRotate = nil
+    cameraReady = false
+end
+
+--========================================
+-- MOVEMENT / RAYCAST HELPERS
+--========================================
+
+local function FlatUnit(vector)
+    local flat = Vector3.new(vector.X, 0, vector.Z)
+    if flat.Magnitude < 0.01 then
+        return Vector3.zero
+    end
+    return flat.Unit
+end
+
+local function DirectionFromAngle(root, degrees)
+    local forward = FlatUnit(root.CFrame.LookVector)
+    local right = FlatUnit(root.CFrame.RightVector)
+    local angle = math.rad(degrees)
+    local direction = forward * math.cos(angle) + right * math.sin(angle)
+    return FlatUnit(direction)
+end
+
+local function GetExcludedCharacters()
+    local excluded = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Character then
+            Append(excluded, player.Character)
+        end
+    end
+    return excluded
+end
+
+local function GetRaycastParams(target)
+    local excluded = GetExcludedCharacters()
+
+    if target then
+        local targetModel = target:FindFirstAncestorOfClass("Model")
+        Append(excluded, targetModel or target)
+    end
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = excluded
+    params.IgnoreWater = true
+    return params
+end
+
+local function IsDirectionClear(direction, root, target)
+    if direction.Magnitude < 0.01 then
+        return false
+    end
+
+    local origin = root.Position + Vector3.new(0, 1.5, 0)
+    local result = Workspace:Raycast(origin, direction * 7, GetRaycastParams(target))
+
+    if result and result.Instance and result.Instance.CanCollide then
+        return false
+    end
+
+    return true
+end
+
+--========================================
+-- EXPLORATION SCANNER
+--========================================
+
+local function GetExploreTargets(root)
+    local character = LocalPlayer.Character
+    if not root or not character then
+        return {}
+    end
+
+    -- GetPartBoundsInRadius requires OverlapParams, not RaycastParams.
+    local overlap = OverlapParams.new()
+    overlap.FilterType = Enum.RaycastFilterType.Exclude
+    overlap.FilterDescendantsInstances = GetExcludedCharacters()
+    overlap.MaxParts = 120
+
+    local ok, parts = pcall(function()
+        return Workspace:GetPartBoundsInRadius(root.Position, 40, overlap)
+    end)
+
+    if not ok or type(parts) ~= "table" then
+        warn("[AI] Explore scan failed: " .. tostring(parts))
+        return {}
+    end
+
+    local targets = {}
+    local seen = {}
+    local ignored = {
+        baseplate = true,
+        terrain = true,
+        part = true,
+        meshpart = true,
+        wedgepart = true,
+        union = true
+    }
+
+    for _, part in ipairs(parts) do
+        if part:IsA("BasePart") and part.CanQuery and part.Transparency < 1 then
+            local model = part:FindFirstAncestorOfClass("Model")
+            local targetObject = model or part
+            local targetName = targetObject.Name
+            local distance = (part.Position - root.Position).Magnitude
+            local hasHumanoid = model and model:FindFirstChildOfClass("Humanoid")
+
+            if not hasHumanoid
+                and not ignored[SafeLower(targetName)]
+                and not seen[targetObject]
+                and distance >= 7
+                and distance <= 38
+            then
+                seen[targetObject] = true
+                Append(targets, {
+                    part = part,
+                    name = targetName,
+                    distance = distance
+                })
+            end
+        end
+    end
+
+    table.sort(targets, function(a, b)
+        return a.distance < b.distance
+    end)
+
+    return targets
+end
+
+local function ChooseExploreDirection(root)
+    local targets = GetExploreTargets(root)
+    local tries = math.min(#targets, 10)
+
+    for _ = 1, tries do
+        local index = math.random(1, #targets)
+        local target = table.remove(targets, index)
+        local direction = FlatUnit(target.part.Position - root.Position)
+
+        if direction.Magnitude > 0.01 and IsDirectionClear(direction, root, target.part) then
+            print("[AI] Exploring toward: " .. tostring(target.name))
+            return direction
+        end
+    end
+
+    return nil
+end
+
+local function ChooseRandomDirection(root)
+    local angles = {0, 35, -35, 65, -65, 100, -100, 145, -145, 180}
+
+    for i = #angles, 2, -1 do
+        local j = math.random(1, i)
+        angles[i], angles[j] = angles[j], angles[i]
+    end
+
+    for _, angle in ipairs(angles) do
+        local direction = DirectionFromAngle(root, angle)
+        if IsDirectionClear(direction, root) then
+            return direction
+        end
+    end
+
+    return Vector3.zero
+end
+
+local function ChooseMovementDirection()
+    local _, humanoid, root = GetCharacterParts(LocalPlayer)
+    if not humanoid or not root or humanoid.Health <= 0 then
+        return Vector3.zero
+    end
+
+    if movementMode == "explore" then
+        local exploreDirection = ChooseExploreDirection(root)
+        if exploreDirection then
+            return exploreDirection
+        end
+    end
+
+    return ChooseRandomDirection(root)
+end
+
+--========================================
+-- MOVEMENT CONTROLLER
+--========================================
+
+local function BindMovementController()
+    if movementBound then
+        return
+    end
+
+    local bindOK, bindError = pcall(function()
+        RunService:BindToRenderStep(
+            MOVEMENT_BIND,
+            Enum.RenderPriority.Camera.Value + 1,
+            function(dt)
+                local _, humanoid, root = GetCharacterParts(LocalPlayer)
+                if not humanoid or not root or humanoid.Health <= 0 then
+                    return
+                end
+
+                if movementActive or spinActive then
+                    UpdateCamera(dt)
+                end
+
+                if movementActive and movementMode == "orbit" and not spinActive then
+                    local targetPlayer = orbitTargetPlayer
+                    local _, targetHumanoid, targetRoot = GetCharacterParts(targetPlayer)
+
+                    if not targetPlayer or targetPlayer.Parent ~= Players
+                        or not targetRoot or not targetHumanoid or targetHumanoid.Health <= 0 then
+                        humanoid:Move(Vector3.zero, false)
+                        if not orbitStopQueued then
+                            orbitStopQueued = true
+                            task.defer(function()
+                                orbitStopQueued = false
+                                if movementActive and movementMode == "orbit" then
+                                    StopMovement()
+                                    SendAI("Orbit stopped because the target is unavailable.")
+                                end
+                            end)
+                        end
+                    else
+                        -- Do not walk toward the target. Reposition directly at the orbit
+                        -- point every render frame, so target movement is followed instantly.
+                        orbitAngle = (orbitAngle + math.rad(orbitSpeedDegrees) * math.max(dt, 0)) % (math.pi * 2)
+                        local orbitOffset = Vector3.new(
+                            math.cos(orbitAngle) * ORBIT_RADIUS,
+                            orbitHeightOffset,
+                            math.sin(orbitAngle) * ORBIT_RADIUS
+                        )
+                        local destination = targetRoot.Position + orbitOffset
+                        local lookAtPosition = targetRoot.Position + Vector3.new(0, 1.5, 0)
+
+                        humanoid.AutoRotate = false
+                        humanoid:Move(Vector3.zero, false)
+                        root.CFrame = CFrame.lookAt(destination, lookAtPosition)
+                        root.AssemblyLinearVelocity = Vector3.zero
+                        root.AssemblyAngularVelocity = Vector3.zero
+                    end
+                elseif movementActive and not spinActive then
+                    humanoid.AutoRotate = true
+                    humanoid:Move(activeWorldDirection, false)
+                else
+                    humanoid:Move(Vector3.zero, false)
+                end
+            end
+        )
+    end)
+
+    if bindOK then
+        movementBound = true
+    else
+        warn("[AI] Could not bind movement controller: " .. tostring(bindError))
+    end
+end
+
+local function CleanupController()
+    if movementActive or spinActive then
+        return
+    end
+
+    if movementBound then
+        pcall(function()
+            RunService:UnbindFromRenderStep(MOVEMENT_BIND)
+        end)
+        movementBound = false
+    end
+
+    local _, humanoid = GetCharacterParts(LocalPlayer)
+    if humanoid then
+        humanoid:Move(Vector3.zero, false)
+    end
+
+    RestoreCamera()
+end
+
+StopMovement = function()
+    movementActive = false
+    movementMode = "none"
+    movementToken = movementToken + 1
+    activeWorldDirection = Vector3.zero
+    orbitTargetPlayer = nil
+
+    local _, humanoid = GetCharacterParts(LocalPlayer)
+    if humanoid then
+        humanoid:Move(Vector3.zero, false)
+        if not spinActive then
+            humanoid.AutoRotate = true
+        end
+    end
+
+    CleanupController()
+end
+
+StopSpin = function()
+    if not spinActive then
+        return
+    end
+
+    spinActive = false
+
+    if spinConnection then
+        spinConnection:Disconnect()
+        spinConnection = nil
+    end
+
+    local _, humanoid = GetCharacterParts(LocalPlayer)
+    if humanoid then
+        humanoid.AutoRotate = true
+    end
+
+    CleanupController()
+end
+
+--========================================
+-- FLY MODE (keyboard + mobile touch controls)
+--========================================
+
+local function CreateFlyTouchControls()
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then
+        return
+    end
+
+    if flyGui then
+        flyGui:Destroy()
+        flyGui = nil
+    end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "AI_FlyControls"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 50
+    gui.Parent = playerGui
+    flyGui = gui
+
+    local function makeHoldButton(name, label, yOffset, setHeld)
+        local button = Instance.new("TextButton")
+        button.Name = name
+        button.AnchorPoint = Vector2.new(1, 1)
+        button.Position = UDim2.new(1, -24, 1, yOffset)
+        button.Size = UDim2.fromOffset(64, 56)
+        button.BackgroundColor3 = Color3.fromRGB(35, 42, 58)
+        button.BackgroundTransparency = 0.12
+        button.TextColor3 = Color3.fromRGB(255, 255, 255)
+        button.Text = label
+        button.TextScaled = true
+        button.Font = Enum.Font.GothamBold
+        button.Parent = gui
+
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 12)
+        corner.Parent = button
+
+        button.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.Touch
+                or input.UserInputType == Enum.UserInputType.MouseButton1 then
+                setHeld(true)
+            end
+        end)
+        button.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.Touch
+                or input.UserInputType == Enum.UserInputType.MouseButton1 then
+                setHeld(false)
+            end
+        end)
+        return button
+    end
+
+    makeHoldButton("FlyUp", "UP", -154, function(value)
+        flyAscendHeld = value
+    end)
+    makeHoldButton("FlyDown", "DOWN", -88, function(value)
+        flyDescendHeld = value
+    end)
+end
+
+StopFly = function()
+    if not flyActive and not flyVelocity and not flyGyro then
+        return
+    end
+
+    flyActive = false
+    flyAscendHeld = false
+    flyDescendHeld = false
+
+    if flyConnection then
+        flyConnection:Disconnect()
+        flyConnection = nil
+    end
+    if flyInputBeganConnection then
+        flyInputBeganConnection:Disconnect()
+        flyInputBeganConnection = nil
+    end
+    if flyInputEndedConnection then
+        flyInputEndedConnection:Disconnect()
+        flyInputEndedConnection = nil
+    end
+
+    if flyVelocity then
+        pcall(function() flyVelocity:Destroy() end)
+        flyVelocity = nil
+    end
+    if flyGyro then
+        pcall(function() flyGyro:Destroy() end)
+        flyGyro = nil
+    end
+    if flyGui then
+        pcall(function() flyGui:Destroy() end)
+        flyGui = nil
+    end
+
+    local _, humanoid = GetCharacterParts(LocalPlayer)
+    if humanoid then
+        humanoid.AutoRotate = true
+    end
+end
+
+local function StartFly()
+    if flyActive then
+        StopFly()
+        SendAI("Fly off.")
+        return
+    end
+
+    StopMovement()
+    StopSpin()
+    StopCustomAnimation()
+
+    local _, humanoid, root = GetCharacterParts(LocalPlayer)
+    if not humanoid or not root or humanoid.Health <= 0 then
+        SendAI("I can't fly right now; your character isn't ready.")
+        return
+    end
+
+    flyActive = true
+    flyAscendHeld = false
+    flyDescendHeld = false
+    humanoid.AutoRotate = false
+
+    local velocity = Instance.new("BodyVelocity")
+    velocity.Name = "AI_FlyVelocity"
+    velocity.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    velocity.P = 15000
+    velocity.Velocity = Vector3.zero
+    velocity.Parent = root
+    flyVelocity = velocity
+
+    local gyro = Instance.new("BodyGyro")
+    gyro.Name = "AI_FlyGyro"
+    gyro.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+    gyro.P = 18000
+    gyro.D = 900
+    gyro.CFrame = root.CFrame
+    gyro.Parent = root
+    flyGyro = gyro
+
+    CreateFlyTouchControls()
+
+    flyInputBeganConnection = UserInputService.InputBegan:Connect(function(input, processed)
+        if processed or UserInputService:GetFocusedTextBox() then
+            return
+        end
+        if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.E then
+            flyAscendHeld = true
+        elseif input.KeyCode == Enum.KeyCode.LeftControl or input.KeyCode == Enum.KeyCode.Q then
+            flyDescendHeld = true
+        end
+    end)
+
+    flyInputEndedConnection = UserInputService.InputEnded:Connect(function(input)
+        if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.E then
+            flyAscendHeld = false
+        elseif input.KeyCode == Enum.KeyCode.LeftControl or input.KeyCode == Enum.KeyCode.Q then
+            flyDescendHeld = false
+        end
+    end)
+
+    flyConnection = RunService.Heartbeat:Connect(function()
+        if not flyActive then
+            return
+        end
+
+        local _, currentHumanoid, currentRoot = GetCharacterParts(LocalPlayer)
+        if not currentHumanoid or not currentRoot or currentHumanoid.Health <= 0
+            or not flyVelocity or not flyGyro then
+            StopFly()
+            return
+        end
+
+        -- Humanoid.MoveDirection reads the normal keyboard or mobile thumbstick.
+        local horizontal = currentHumanoid.MoveDirection * FLY_SPEED
+        local vertical = 0
+        if flyAscendHeld and not flyDescendHeld then
+            vertical = FLY_SPEED
+        elseif flyDescendHeld and not flyAscendHeld then
+            vertical = -FLY_SPEED
+        end
+        flyVelocity.Velocity = Vector3.new(horizontal.X, vertical, horizontal.Z)
+
+        local camera = Workspace.CurrentCamera
+        local facing = camera and camera.CFrame.LookVector or currentRoot.CFrame.LookVector
+        local flatFacing = Vector3.new(facing.X, 0, facing.Z)
+        if flatFacing.Magnitude > 0.01 then
+            flyGyro.CFrame = CFrame.lookAt(currentRoot.Position, currentRoot.Position + flatFacing.Unit)
+        end
+    end)
+
+    SendAI("Fly on. Use your movement stick to move, hold UP/DOWN on the screen to change height, or use Space/E and Ctrl/Q.")
+end
+
+local function StartMovement(mode)
+    if movementActive and movementMode == mode then
+        return
+    end
+
+    StopFly()
+    StopCustomAnimation()
+    StopSpin()
+    StopMovement()
+
+    movementActive = true
+    movementMode = mode
+    movementToken = movementToken + 1
+    local myToken = movementToken
+
+    TakeCameraControl()
+    BindMovementController()
+
+    task.spawn(function()
+        while movementActive and movementToken == myToken do
+            local _, humanoid, root = GetCharacterParts(LocalPlayer)
+
+            if not humanoid or not root or humanoid.Health <= 0 then
+                activeWorldDirection = Vector3.zero
+                task.wait(0.5)
+            else
+                -- Small pauses are intentional, but movement resumes automatically.
+                local pauseChance = (mode == "explore") and 0.16 or 0.10
+                if math.random() < pauseChance then
+                    activeWorldDirection = Vector3.zero
+                    task.wait(math.random(4, 10) / 10)
+                end
+
+                if not movementActive or movementToken ~= myToken then
+                    break
+                end
+
+                local direction = ChooseMovementDirection()
+
+                if direction.Magnitude < 0.01 then
+                    activeWorldDirection = Vector3.zero
+                    task.wait(0.45)
+                else
+                    activeWorldDirection = direction
+                    local duration = math.random(18, 34) / 10
+                    local endTime = os.clock() + duration
+
+                    while os.clock() < endTime
+                        and movementActive
+                        and movementToken == myToken
+                    do
+                        local _, currentHumanoid, currentRoot = GetCharacterParts(LocalPlayer)
+                        if not currentHumanoid or not currentRoot or currentHumanoid.Health <= 0 then
+                            break
+                        end
+
+                        if not IsDirectionClear(activeWorldDirection, currentRoot) then
+                            break
+                        end
+
+                        task.wait(0.12)
+                    end
+
+                    activeWorldDirection = Vector3.zero
+                    task.wait(0.15)
+                end
+            end
+        end
+
+        if movementToken == myToken then
+            activeWorldDirection = Vector3.zero
+        end
+    end)
+end
+
+local function StartAutopilot()
+    StartMovement("autopilot")
+    SendAI("Autopilot on.")
+end
+
+local function StartExploring()
+    currentGoal = "Explore different nearby objects and areas."
+    StartMovement("explore")
+    SendAI("Let's explore!")
+end
+
+--========================================
+-- SPIN
+--========================================
+
+local function StartSpin()
+    if spinActive then
+        SendAI("I'm already spinning.")
+        return
+    end
+
+    StopFly()
+    StopCustomAnimation()
+    StopMovement()
+
+    local _, humanoid, root = GetCharacterParts(LocalPlayer)
+    if not humanoid or not root or humanoid.Health <= 0 then
+        SendAI("I can't spin right now.")
+        return
+    end
+
+    spinActive = true
+    TakeCameraControl()
+    BindMovementController()
+    humanoid.AutoRotate = false
+
+    spinConnection = RunService.Heartbeat:Connect(function(dt)
+        if not spinActive then
+            return
+        end
+
+        local _, currentHumanoid, currentRoot = GetCharacterParts(LocalPlayer)
+        if not currentHumanoid or not currentRoot or currentHumanoid.Health <= 0 then
+            return
+        end
+
+        currentHumanoid.AutoRotate = false
+        currentRoot.CFrame = currentRoot.CFrame * CFrame.Angles(0, math.rad(360) * dt, 0)
+    end)
+
+    SendAI("Spinning!")
+end
+
+--========================================
+-- ORBIT AROUND A PLAYER
+--========================================
+
+local function FindPlayerByNameOrDisplayName(query)
+    local wanted = SafeLower(Trim(query))
+    if wanted == "" then
+        return nil, "Type a player's DisplayName or Username."
+    end
+
+    -- Username matches take priority because usernames are unique.
+    for _, player in ipairs(Players:GetPlayers()) do
+        if SafeLower(player.Name) == wanted then
+            return player
+        end
+    end
+
+    local displayMatches = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if SafeLower(player.DisplayName) == wanted then
+            Append(displayMatches, player)
+        end
+    end
+
+    if #displayMatches == 1 then
+        return displayMatches[1]
+    elseif #displayMatches > 1 then
+        return nil, "More than one player has that DisplayName. Use their Username instead."
+    end
+
+    return nil, "I couldn't find that player. Check their DisplayName or Username."
+end
+
+local function AddWhitelistIdentifier(identifier)
+    local clean = Trim(identifier)
+    if clean == "" then
+        return false, "Use /ai whitelist [Username or DisplayName]."
+    end
+
+    local player, reason = FindPlayerByNameOrDisplayName(clean)
+    if not player and reason and reason:find("More than one player", 1, true) then
+        return false, reason
+    end
+
+    if player then
+        Whitelist["uid:" .. tostring(player.UserId)] = true
+        Whitelist["name:" .. SafeLower(player.Name)] = true
+        Whitelist["name:" .. SafeLower(player.DisplayName)] = true
+        -- Keep plain-name keys for compatibility with older saved whitelist data.
+        Whitelist[SafeLower(player.Name)] = true
+        Whitelist[SafeLower(player.DisplayName)] = true
+        SaveWhitelistData()
+        return true, "Whitelisted " .. GetPlayerName(player) .. " (" .. player.Name .. ")."
+    end
+
+    local normalized = SafeLower(clean)
+    Whitelist["name:" .. normalized] = true
+    Whitelist[normalized] = true
+    SaveWhitelistData()
+    return true, "Saved " .. clean .. " to the whitelist. If that player is in this server, their Username or DisplayName will match."
+end
+
+local function RemoveWhitelistIdentifier(identifier)
+    local clean = Trim(identifier)
+    if clean == "" then
+        return false, "Use /ai unwhitelist [Username or DisplayName]."
+    end
+
+    local player = FindPlayerByNameOrDisplayName(clean)
+    if player then
+        Whitelist["uid:" .. tostring(player.UserId)] = nil
+        Whitelist["name:" .. SafeLower(player.Name)] = nil
+        Whitelist["name:" .. SafeLower(player.DisplayName)] = nil
+        Whitelist[SafeLower(player.Name)] = nil
+        Whitelist[SafeLower(player.DisplayName)] = nil
+        SaveWhitelistData()
+        return true, "Removed " .. GetPlayerName(player) .. " (" .. player.Name .. ") from the whitelist."
+    end
+
+    local normalized = SafeLower(clean)
+    Whitelist["name:" .. normalized] = nil
+    Whitelist[normalized] = nil
+    SaveWhitelistData()
+    return true, "Removed " .. clean .. " from the whitelist."
+end
+
+local function IsWhitelisted(player)
+    if not player then
+        return false
+    end
+
+    local userIdKey = "uid:" .. tostring(player.UserId)
+    local username = SafeLower(player.Name)
+    local displayName = SafeLower(player.DisplayName)
+
+    return Whitelist[userIdKey] == true
+        or Whitelist["name:" .. username] == true
+        or Whitelist["name:" .. displayName] == true
+        or Whitelist[username] == true
+        or Whitelist[displayName] == true
+end
+
+--========================================
+-- LOCAL PLAYER ESP
+--========================================
+
+local function RemovePlayerESP(player)
+    local objects = espObjects[player]
+    if not objects then
+        return
+    end
+
+    for _, instance in ipairs(objects) do
+        pcall(function()
+            instance:Destroy()
+        end)
+    end
+    espObjects[player] = nil
+end
+
+local function BuildPlayerESP(player)
+    if not espActive or not player or player == LocalPlayer then
+        return
+    end
+
+    local character = player.Character
+    if not character or not character.Parent then
+        return
+    end
+
+    RemovePlayerESP(player)
+
+    local head = character:FindFirstChild("Head")
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local adornee = head or root
+    if not adornee then
+        return
+    end
+
+    local created = {}
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "AI_LocalESP_Highlight"
+    highlight.Adornee = character
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillTransparency = 0.72
+    highlight.OutlineTransparency = 0
+    highlight.Parent = character
+    Append(created, highlight)
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "AI_LocalESP_Label"
+    billboard.Adornee = adornee
+    billboard.AlwaysOnTop = true
+    billboard.LightInfluence = 0
+    billboard.MaxDistance = 10000
+    billboard.Size = UDim2.new(0, 190, 0, 34)
+    billboard.StudsOffset = Vector3.new(0, 2.7, 0)
+    billboard.Parent = character
+    Append(created, billboard)
+
+    local label = Instance.new("TextLabel")
+    label.Name = "PlayerName"
+    label.BackgroundTransparency = 1
+    label.Size = UDim2.fromScale(1, 1)
+    label.Font = Enum.Font.GothamBold
+    label.Text = GetPlayerName(player) .. "  (" .. player.Name .. ")"
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextSize = 13
+    label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    label.TextStrokeTransparency = 0.15
+    label.Parent = billboard
+
+    espObjects[player] = created
+end
+
+local function ConnectPlayerESP(player)
+    if not espActive or player == LocalPlayer or espPlayerConnections[player] then
+        return
+    end
+
+    espPlayerConnections[player] = player.CharacterAdded:Connect(function()
+        task.wait(0.35)
+        BuildPlayerESP(player)
+    end)
+
+    if player.Character then
+        task.spawn(function()
+            BuildPlayerESP(player)
+        end)
+    end
+end
+
+local function StopESP()
+    espActive = false
+
+    if espAddedConnection then
+        espAddedConnection:Disconnect()
+        espAddedConnection = nil
+    end
+    if espRemovingConnection then
+        espRemovingConnection:Disconnect()
+        espRemovingConnection = nil
+    end
+
+    for player, connection in pairs(espPlayerConnections) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+        espPlayerConnections[player] = nil
+    end
+
+    for player in pairs(espObjects) do
+        RemovePlayerESP(player)
+    end
+end
+
+local function StartESP()
+    if espActive then
+        SendAI("ESP is already on. Use /ai esp off to disable it.")
+        return
+    end
+
+    espActive = true
+    for _, player in ipairs(Players:GetPlayers()) do
+        ConnectPlayerESP(player)
+    end
+
+    espAddedConnection = Players.PlayerAdded:Connect(function(player)
+        ConnectPlayerESP(player)
+    end)
+    espRemovingConnection = Players.PlayerRemoving:Connect(function(player)
+        RemovePlayerESP(player)
+        local connection = espPlayerConnections[player]
+        if connection then
+            connection:Disconnect()
+            espPlayerConnections[player] = nil
+        end
+    end)
+
+    SendAI("ESP on. Other players are highlighted locally, including through walls. Use /ai esp off to turn it off.")
+end
+
+local function GoToPlayer(query)
+    local targetPlayer, reason = FindPlayerByNameOrDisplayName(query)
+    if not targetPlayer then
+        SendAI(reason)
+        return
+    end
+    if targetPlayer == LocalPlayer then
+        SendAI("I'm already at your character.")
+        return
+    end
+
+    local _, targetHumanoid, targetRoot = GetCharacterParts(targetPlayer)
+    local _, humanoid, root = GetCharacterParts(LocalPlayer)
+    if not targetRoot or not targetHumanoid or targetHumanoid.Health <= 0
+        or not root or not humanoid or humanoid.Health <= 0 then
+        SendAI("I can't teleport because one of the characters isn't available.")
+        return
+    end
+
+    StopFly()
+    StopMovement()
+    StopSpin()
+    StopCustomAnimation()
+
+    local destination = targetRoot.CFrame * CFrame.new(0, 0, 4)
+    root.CFrame = destination
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    SendAI("Teleported near " .. GetPlayerName(targetPlayer) .. ".")
+end
+
+local function ClearCopiedChatQueue()
+    copiedChatQueue = {}
+    copiedChatQueueHead = 1
+    copiedChatQueueTail = 0
+end
+
+local function SetCopyChatTarget(query)
+    if SafeLower(Trim(query)) == "off" or SafeLower(Trim(query)) == "stop" then
+        local oldTarget = copiedChatTarget
+        copiedChatTarget = nil
+        ClearCopiedChatQueue()
+        if oldTarget then
+            SendAI("Stopped relaying " .. GetPlayerName(oldTarget) .. "'s chat.")
+        else
+            SendAI("Chat copying is already off.")
+        end
+        return
+    end
+
+    local targetPlayer, reason = FindPlayerByNameOrDisplayName(query)
+    if not targetPlayer then
+        SendAI(reason)
+        return
+    end
+    if targetPlayer == LocalPlayer then
+        SendAI("Choose another player's public chat to relay.")
+        return
+    end
+
+    -- Discard any not-yet-sent messages from the previous target.
+    ClearCopiedChatQueue()
+    copiedChatTarget = targetPlayer
+    copiedChatSeen = {}
+    SendAI("Now relaying " .. GetPlayerName(targetPlayer) .. "'s public chat through your account using the format [DisplayName]: message. Other players can see the relayed messages. Use /ai copychat off to stop.")
+end
+
+local function StartCopiedChatQueueWorker()
+    if copiedChatQueueRunning then
+        return
+    end
+
+    copiedChatQueueRunning = true
+    task.spawn(function()
+        while copiedChatQueueHead <= copiedChatQueueTail do
+            local outgoing = copiedChatQueue[copiedChatQueueHead]
+            copiedChatQueue[copiedChatQueueHead] = nil
+            copiedChatQueueHead = copiedChatQueueHead + 1
+
+            local channel = GetChatChannel()
+            if channel and outgoing then
+                local sent, sendError = pcall(function()
+                    channel:SendAsync(outgoing)
+                end)
+                if not sent then
+                    warn("[AI] Could not relay copied chat: " .. tostring(sendError))
+                end
+            else
+                warn("[AI] Cannot relay copied chat because no chat channel is available.")
+            end
+
+            task.wait(COPIED_CHAT_SEND_DELAY)
+        end
+
+        copiedChatQueue = {}
+        copiedChatQueueHead = 1
+        copiedChatQueueTail = 0
+        copiedChatQueueRunning = false
+
+        -- Recheck after releasing the worker flag in case new text arrived.
+        if copiedChatQueueHead <= copiedChatQueueTail then
+            StartCopiedChatQueueWorker()
+        end
+    end)
+end
+
+local function QueueCopiedChatAsOwner(speaker, clean)
+    local prefix = "[" .. GetPlayerName(speaker) .. "]: "
+    local maxBodyLength = math.max(40, COPIED_CHAT_MAX_MESSAGE_LENGTH - #prefix)
+    local remaining = clean
+
+    while #remaining > 0 do
+        local piece
+        if #remaining <= maxBodyLength then
+            piece = remaining
+            remaining = ""
+        else
+            local candidate = remaining:sub(1, maxBodyLength)
+            local splitAt = candidate:match(".*()%s")
+            if splitAt and splitAt > 1 then
+                piece = Trim(remaining:sub(1, splitAt - 1))
+                remaining = Trim(remaining:sub(splitAt + 1))
+            else
+                piece = candidate
+                remaining = Trim(remaining:sub(maxBodyLength + 1))
+            end
+        end
+
+        if piece ~= "" then
+            if copiedChatQueueTail - copiedChatQueueHead + 1 >= COPIED_CHAT_MAX_QUEUE then
+                warn("[AI] CopyChat relay queue is full; some incoming text was skipped.")
+                return
+            end
+            copiedChatQueueTail = copiedChatQueueTail + 1
+            copiedChatQueue[copiedChatQueueTail] = prefix .. piece
+        end
+    end
+
+    StartCopiedChatQueueWorker()
+end
+
+local function HandleCopiedChatMessage(speaker, messageText)
+    if not copiedChatTarget or speaker ~= copiedChatTarget or type(messageText) ~= "string" then
+        return
+    end
+    local clean = Trim(messageText):gsub("[%c]", " "):gsub("%s+", " ")
+    if clean == "" then
+        return
+    end
+
+    -- TextChatService and legacy Chatted may report the same public message.
+    local key = tostring(speaker.UserId) .. "|" .. clean
+    local now = os.clock()
+    if copiedChatSeen[key] and now - copiedChatSeen[key] < 1.25 then
+        return
+    end
+    copiedChatSeen[key] = now
+    for oldKey, seenAt in pairs(copiedChatSeen) do
+        if now - seenAt > 8 then
+            copiedChatSeen[oldKey] = nil
+        end
+    end
+
+    -- Re-send through the owner's chat account, clearly attributing the source.
+    QueueCopiedChatAsOwner(speaker, clean)
+end
+
+local function StartOrbit(query, requestedSpeed)
+    local targetPlayer, reason = FindPlayerByNameOrDisplayName(query)
+    if not targetPlayer then
+        SendAI(reason)
+        return
+    end
+
+    if targetPlayer == LocalPlayer then
+        SendAI("I can't orbit around myself. Give me another player's name.")
+        return
+    end
+
+    local _, targetHumanoid, targetRoot = GetCharacterParts(targetPlayer)
+    if not targetRoot or not targetHumanoid or targetHumanoid.Health <= 0 then
+        SendAI("That player's character isn't available right now.")
+        return
+    end
+
+    local chosenSpeed = tonumber(requestedSpeed) or ORBIT_DEFAULT_SPEED
+    if chosenSpeed <= 0 then
+        SendAI("Orbit speed must be a positive number.")
+        return
+    end
+    chosenSpeed = math.clamp(chosenSpeed, ORBIT_MIN_SPEED, ORBIT_MAX_SPEED)
+
+    StopFly()
+    StopCustomAnimation()
+    StopSpin()
+    StopMovement()
+
+    local _, humanoid, root = GetCharacterParts(LocalPlayer)
+    if not humanoid or not root or humanoid.Health <= 0 then
+        SendAI("I can't start orbiting right now.")
+        return
+    end
+
+    -- Keep the current side of the target, but snap to the orbit radius immediately.
+    local initialOffset = Vector3.new(
+        root.Position.X - targetRoot.Position.X,
+        0,
+        root.Position.Z - targetRoot.Position.Z
+    )
+    if initialOffset.Magnitude > 0.1 then
+        orbitAngle = math.atan2(initialOffset.Z, initialOffset.X)
+    else
+        orbitAngle = 0
+    end
+    orbitHeightOffset = math.clamp(root.Position.Y - targetRoot.Position.Y, -4, 4)
+    orbitSpeedDegrees = chosenSpeed
+    orbitTargetPlayer = targetPlayer
+    movementActive = true
+    movementMode = "orbit"
+    movementToken = movementToken + 1
+    activeWorldDirection = Vector3.zero
+
+    local firstOffset = Vector3.new(
+        math.cos(orbitAngle) * ORBIT_RADIUS,
+        orbitHeightOffset,
+        math.sin(orbitAngle) * ORBIT_RADIUS
+    )
+    local firstPosition = targetRoot.Position + firstOffset
+    root.CFrame = CFrame.lookAt(firstPosition, targetRoot.Position + Vector3.new(0, 1.5, 0))
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+
+    TakeCameraControl()
+    BindMovementController()
+    humanoid.AutoRotate = false
+
+    SendAI(string.format(
+        "Orbiting around %s at %g degrees per second. Use /ai orbit off to stop.",
+        GetPlayerName(targetPlayer), orbitSpeedDegrees
+    ))
+end
+
+--========================================
+-- COLLISION MESSAGE
+--========================================
+
+local function BindHitDetection(character)
+    if touchConnection then
+        touchConnection:Disconnect()
+        touchConnection = nil
+    end
+
+    local root = character:WaitForChild("HumanoidRootPart", 10)
+    if not root then
+        return
+    end
+
+    touchConnection = root.Touched:Connect(function(hit)
+        -- Collision reactions belong to autopilot only. Orbit, exploration,
+        -- spin, and manual movement must not trigger the "Ow! That hurts!" line.
+        if not movementActive or movementMode ~= "autopilot"
+            or not hit or not hit:IsA("BasePart") then
+            return
+        end
+
+        if not hit.CanCollide or hit:IsDescendantOf(character) then
+            return
+        end
+
+        local model = hit:FindFirstAncestorOfClass("Model")
+        if model and model:FindFirstChildOfClass("Humanoid") then
+            return
+        end
+
+        if hit.Position.Y < root.Position.Y - 2.5 then
+            return
+        end
+
+        if os.clock() - lastHitTime < HIT_COOLDOWN then
+            return
+        end
+
+        lastHitTime = os.clock()
+        SendAI("Ow! That hurts!")
+    end)
+end
+
+--========================================
+-- LOCAL MOVEMENT SETTINGS + COMMAND HELP
+--========================================
+
+local function SetWalkSpeedFromCommand(rawValue)
+    local value = tonumber(rawValue)
+    if not value or value <= 0 then
+        SendAI("Use /ai speed [number], from 1 to 250.")
+        return
+    end
+    if value > 250 then
+        SendAI("WalkSpeed must be between 1 and 250.")
+        return
+    end
+
+    local _, humanoid = GetCharacterParts(LocalPlayer)
+    if not humanoid or humanoid.Health <= 0 then
+        SendAI("Your character isn't ready yet.")
+        return
+    end
+
+    local ok, err = pcall(function()
+        humanoid.WalkSpeed = value
+    end)
+    if ok then
+        SendAI("WalkSpeed set to " .. tostring(value) .. ".")
+    else
+        warn("[AI] Could not set WalkSpeed: " .. tostring(err))
+        SendAI("I couldn't change WalkSpeed in this game.")
+    end
+end
+
+local function SetJumpPowerFromCommand(rawValue)
+    local value = tonumber(rawValue)
+    if not value or value <= 0 then
+        SendAI("Use /ai jump [number], from 1 to 250.")
+        return
+    end
+    if value > 250 then
+        SendAI("JumpPower must be between 1 and 250.")
+        return
+    end
+
+    local _, humanoid = GetCharacterParts(LocalPlayer)
+    if not humanoid or humanoid.Health <= 0 then
+        SendAI("Your character isn't ready yet.")
+        return
+    end
+
+    local ok, err = pcall(function()
+        humanoid.UseJumpPower = true
+        humanoid.JumpPower = value
+    end)
+    if ok then
+        SendAI("JumpPower set to " .. tostring(value) .. ".")
+    else
+        warn("[AI] Could not set JumpPower: " .. tostring(err))
+        SendAI("I couldn't change JumpPower in this game.")
+    end
+end
+
+local function SendCommandInfo()
+    SendAI("Commands: /ai rejoin; /ai serverhop; /ai esp on/off; /ai explode; /ai fly on/off; /ai goto [player]; /ai copychat [player] (publicly relays as [DisplayName]: message) or copychat off; /ai sing [song] (original lyrics only); /ai roast; /ai autopilot on/off; /ai explore on/off; /ai goal [text]; /ai orbit [speed] [player] or orbit off; /ai spin on/off; /ai dance or dance 2; /ai float or float off; /ai backflip; /ai speed [1-250]; /ai jump [1-250]; /ai stop; /ai status; /ai whitelist [username]; /ai unwhitelist [username]; /ai info.")
+end
+
+local function ResetOwnCharacter()
+    StopFly()
+    StopMovement()
+    StopSpin()
+    StopCustomAnimation()
+
+    local character, humanoid = GetCharacterParts(LocalPlayer)
+    if not character or not humanoid or humanoid.Health <= 0 then
+        SendAI("Your character is already unavailable.")
+        return
+    end
+
+    SendAI("Resetting my character.")
+    local resetOK, resetError = pcall(function()
+        humanoid.Health = 0
+        character:BreakJoints()
+    end)
+    if not resetOK then
+        warn("[AI] Could not reset character cleanly: " .. tostring(resetError))
+        pcall(function()
+            humanoid.Health = 0
+        end)
+    end
+end
+
+local function QueueOriginalSong(songName)
+    local title = Trim(songName)
+    if title == "" then
+        SendAI("Use /ai sing [song name]. I can make a short original song about its general theme, but I can't reproduce copyrighted lyrics.")
+        return
+    end
+
+    QueueQuestion(
+        "Create a short original 4-line song inspired only by the broad theme or mood associated with the song title: "
+        .. title .. ". Do not search for, quote, reproduce, or closely imitate the real song's lyrics. Make new wording and clearly present it as an original version.",
+        LocalPlayer
+    )
+end
+
+local function QueueFriendlyRoast()
+    QueueQuestion(
+        "Give me one playful, friendly, PG-rated roast. Keep it light, avoid appearance, body, identity, protected traits, threats, or genuinely hurtful insults. One sentence only.",
+        LocalPlayer
+    )
+end
+
+--========================================
+-- REJOIN / PUBLIC SERVER HOP
+--========================================
+
+local function RequestServerListPage(placeId, cursor)
+    local url = "https://games.roblox.com/v1/games/" .. tostring(placeId)
+        .. "/servers/Public?sortOrder=Asc&limit=100"
+    if cursor and cursor ~= "" then
+        url = url .. "&cursor=" .. HttpService:UrlEncode(cursor)
+    end
+
+    local body = nil
+    local requestError = nil
+
+    if type(httpRequest) == "function" then
+        local ok, response = pcall(function()
+            return httpRequest({
+                Url = url,
+                Method = "GET",
+                Headers = { ["Accept"] = "application/json" }
+            })
+        end)
+        if ok and response then
+            if type(response) == "string" then
+                body = response
+            elseif type(response) == "table" then
+                local statusCode = tonumber(response.StatusCode or response.Status)
+                if statusCode and (statusCode < 200 or statusCode >= 300) then
+                    requestError = "Roblox server-list request returned HTTP " .. tostring(statusCode) .. "."
+                else
+                    body = response.Body or response.body
+                end
+            end
+        elseif not ok then
+            requestError = tostring(response)
+        end
+    end
+
+    if (type(body) ~= "string" or body == "") then
+        local ok, result = pcall(function()
+            return game:HttpGet(url)
+        end)
+        if ok and type(result) == "string" then
+            body = result
+        elseif not requestError then
+            requestError = tostring(result)
+        end
+    end
+
+    if type(body) ~= "string" or body == "" then
+        return nil, requestError or "No HTTP response was available."
+    end
+
+    local decodeOK, decoded = pcall(function()
+        return HttpService:JSONDecode(body)
+    end)
+    if not decodeOK or type(decoded) ~= "table" then
+        return nil, "Roblox returned an unreadable server list."
+    end
+
+    return decoded
+end
+
+local function RejoinCurrentServer()
+    if teleportPending then
+        SendAI("A teleport is already in progress.")
+        return
+    end
+
+    teleportPending = true
+    local autoloadQueued, autoloadReason = QueueScriptAutoload()
+    if autoloadQueued then
+        SendAI("Rejoining this server. Script autoload is queued.")
+    else
+        warn("[AI] Autoload was not queued: " .. tostring(autoloadReason))
+        SendAI("Rejoining this server. Autoload is not configured: " .. tostring(autoloadReason) .. ".")
+    end
+    task.delay(0.8, function()
+        local ok, err = pcall(function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+        end)
+        if not ok then
+            teleportPending = false
+            warn("[AI] Rejoin failed: " .. tostring(err))
+            SendAI("Rejoin failed: " .. tostring(err))
+        end
+    end)
+end
+
+pcall(function()
+    TeleportService.TeleportInitFailed:Connect(function(player, teleportResult, errorMessage)
+        if player == LocalPlayer then
+            teleportPending = false
+            local reason = errorMessage or teleportResult or "Unknown teleport error"
+            warn("[AI] Teleport initialization failed: " .. tostring(reason))
+            SendAI("Teleport failed: " .. tostring(reason))
+        end
+    end)
+end)
+
+local function StartServerHop()
+    if teleportPending then
+        SendAI("A teleport is already in progress.")
+        return
+    end
+
+    teleportPending = true
+    SendAI("Searching for another public server...")
+
+    task.spawn(function()
+        local candidates = {}
+        local cursor = nil
+        local lastError = nil
+
+        -- Check a few pages so a different server can still be found when the
+        -- first page is mostly full or includes the current instance.
+        for pageNumber = 1, 3 do
+            local page, pageError = RequestServerListPage(game.PlaceId, cursor)
+            if not page then
+                lastError = pageError
+                break
+            end
+
+            if type(page.data) == "table" then
+                for _, server in ipairs(page.data) do
+                    local serverId = server and server.id
+                    local playing = tonumber(server and server.playing)
+                    local maxPlayers = tonumber(server and server.maxPlayers)
+                    if type(serverId) == "string"
+                        and serverId ~= ""
+                        and serverId ~= game.JobId
+                        and playing and maxPlayers
+                        and playing < maxPlayers then
+                        Append(candidates, {
+                            id = serverId,
+                            playing = playing,
+                            maxPlayers = maxPlayers
+                        })
+                    end
+                end
+            end
+
+            cursor = page.nextPageCursor
+            if type(cursor) ~= "string" or cursor == "" then
+                break
+            end
+        end
+
+        if #candidates == 0 then
+            teleportPending = false
+            if lastError then
+                warn("[AI] Server hop lookup failed: " .. tostring(lastError))
+                SendAI("I couldn't load the public server list. Check that HTTP requests are available, then try again.")
+            else
+                SendAI("I couldn't find another available public server for this place.")
+            end
+            return
+        end
+
+        -- Prefer less crowded servers, then choose randomly among the least
+        -- crowded group to avoid repeatedly targeting the same full instances.
+        table.sort(candidates, function(a, b)
+            return (a.playing / a.maxPlayers) < (b.playing / b.maxPlayers)
+        end)
+        local topCount = math.min(12, #candidates)
+        local target = candidates[math.random(1, topCount)]
+
+        local autoloadQueued, autoloadReason = QueueScriptAutoload()
+        if autoloadQueued then
+            SendAI("Found another server. Script autoload is queued; joining now...")
+        else
+            warn("[AI] Autoload was not queued: " .. tostring(autoloadReason))
+            SendAI("Found another server. Joining now, but autoload is not configured: " .. tostring(autoloadReason) .. ".")
+        end
+        task.wait(0.8)
+        local ok, err = pcall(function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
+        end)
+        if not ok then
+            teleportPending = false
+            warn("[AI] Server hop failed: " .. tostring(err))
+            SendAI("Server hop failed: " .. tostring(err))
+        end
+    end)
+end
+
+--========================================
+-- OWNER COMMANDS
+--========================================
+
+local function HandleOwnerCommand(args)
+    local lower = SafeLower(args)
+
+    if lower == "rejoin" then
+        RejoinCurrentServer()
+        return true
+    elseif lower == "serverhop" then
+        StartServerHop()
+        return true
+    elseif lower == "esp" then
+        if espActive then
+            StopESP()
+            SendAI("ESP off.")
+        else
+            StartESP()
+        end
+        return true
+    elseif lower == "esp on" then
+        StartESP()
+        return true
+    elseif lower == "esp off" or lower == "esp stop" then
+        if espActive then
+            StopESP()
+            SendAI("ESP off.")
+        else
+            SendAI("ESP is already off.")
+        end
+        return true
+    elseif lower == "explode" or lower == "reset" then
+        ResetOwnCharacter()
+        return true
+    elseif lower == "fly" then
+        if flyActive then
+            StopFly()
+            SendAI("Fly off.")
+        else
+            StartFly()
+        end
+        return true
+    elseif lower == "fly on" then
+        if flyActive then
+            SendAI("Fly is already on. Use /ai fly off to stop.")
+        else
+            StartFly()
+        end
+        return true
+    elseif lower == "fly off" or lower == "fly stop" then
+        StopFly()
+        SendAI("Fly off.")
+        return true
+    elseif lower == "roast" then
+        QueueFriendlyRoast()
+        return true
+    elseif lower == "sing" then
+        QueueOriginalSong("")
+        return true
+    elseif lower:match("^sing%s+.+$") then
+        local songName = Trim(args:match("^[Ss][Ii][Nn][Gg]%s+(.+)$"))
+        QueueOriginalSong(songName)
+        return true
+    elseif lower == "copychat" then
+        SendAI("Use /ai copychat [Username or DisplayName] to relay their public chat through your account using [DisplayName]: message, or /ai copychat off to stop.")
+        return true
+    elseif lower:match("^copychat%s+.+$") then
+        local targetName = Trim(args:match("^[Cc][Oo][Pp][Yy][Cc][Hh][Aa][Tt]%s+(.+)$"))
+        SetCopyChatTarget(targetName)
+        return true
+    elseif lower == "goto" then
+        SendAI("Use /ai goto [Username or DisplayName].")
+        return true
+    elseif lower:match("^goto%s+.+$") then
+        local targetName = Trim(args:match("^[Gg][Oo][Tt][Oo]%s+(.+)$"))
+        GoToPlayer(targetName)
+        return true
+    elseif lower == "info" or lower == "commands" then
+        SendCommandInfo()
+        return true
+    elseif lower == "fling" or lower:match("^fling%s+") then
+        SendAI("I can't add a command that forcibly flings another player. I can help with a harmless orbit or a server-authorized admin feature in a game you own.")
+        return true
+    elseif lower:match("^speed%s+.+$") then
+        local value = args:match("^[Ss][Pp][Ee][Ee][Dd]%s+(.+)$")
+        SetWalkSpeedFromCommand(value)
+        return true
+    elseif lower == "speed" then
+        SendAI("Use /ai speed [number], from 1 to 250.")
+        return true
+    elseif lower:match("^jump%s+.+$") then
+        local value = args:match("^[Jj][Uu][Mm][Pp]%s+(.+)$")
+        SetJumpPowerFromCommand(value)
+        return true
+    elseif lower == "jump" then
+        SendAI("Use /ai jump [number], from 1 to 250.")
+        return true
+    elseif lower == "spin" or lower == "spin on" then
+        StartSpin()
+        return true
+    elseif lower == "spin off" then
+        StopSpin()
+        SendAI("Spin stopped.")
+        return true
+    elseif lower == "orbit off" or lower == "orbit stop" then
+        if movementMode == "orbit" then
+            StopMovement()
+            SendAI("Orbit stopped.")
+        else
+            SendAI("I'm not orbiting anyone right now.")
+        end
+        return true
+    elseif lower == "orbit" then
+        SendAI("Use /ai orbit [speed] [DisplayName or Username]. Example: /ai orbit 40 GettingSniper53")
+        return true
+    elseif lower:match("^orbit%s+.+$") then
+        local orbitArguments = Trim(args:match("^[Oo][Rr][Bb][Ii][Tt]%s+(.+)$"))
+        local firstWord, remainingWords = orbitArguments:match("^(%S+)%s+(.+)$")
+        local parsedSpeed = firstWord and tonumber(firstWord) or nil
+
+        if parsedSpeed then
+            StartOrbit(Trim(remainingWords), parsedSpeed)
+        else
+            StartOrbit(orbitArguments, nil)
+        end
+        return true
+    elseif lower == "backflip" or lower == "backflip on" then
+        StartBackflip()
+        return true
+    elseif lower == "float" or lower == "float on" then
+        StartFloat()
+        return true
+    elseif lower == "float off" or lower == "dance off" or lower == "animation off" then
+        StopCustomAnimation()
+        SendAI("Animation stopped.")
+        return true
+    elseif lower == "dance" or lower == "dance on" or lower == "dance 1" then
+        StartDance(1)
+        return true
+    elseif lower == "dance 2" then
+        StartDance(2)
+        return true
+    elseif lower == "autopilot" or lower == "autopilot on" then
+        StartAutopilot()
+        return true
+    elseif lower == "autopilot off" then
+        StopMovement()
+        SendAI("Autopilot off.")
+        return true
+    elseif lower == "goal explore" or lower == "goal explore on"
+        or lower == "explore" or lower == "explore on" then
+        StartExploring()
+        return true
+    elseif lower == "goal explore off" or lower == "goal stop" or lower == "explore off" then
+        if movementMode == "explore" then
+            StopMovement()
+            SendAI("Exploration stopped.")
+        else
+            SendAI("Exploration is already off.")
+        end
+        return true
+    elseif lower == "stop" then
+        StopFly()
+        StopMovement()
+        StopSpin()
+        StopCustomAnimation()
+        SendAI("Stopped.")
+        return true
+    elseif lower == "status" then
+        SendAI(
+            "Movement: " .. (movementActive and movementMode or "off")
+            .. ". Spin: " .. (spinActive and "on" or "off")
+            .. ". Fly: " .. (flyActive and "on" or "off")
+            .. ". ESP: " .. (espActive and "on" or "off")
+            .. ". Chat relay: " .. (copiedChatTarget and GetPlayerName(copiedChatTarget) or "off")
+            .. ". Animation: " .. (activeAnimationName or "off") .. "."
+        )
+        return true
+    end
+
+    local newGoal = args:match("^[Gg][Oo][Aa][Ll]%s+(.+)$")
+    if newGoal then
+        currentGoal = Trim(newGoal)
+        SendAI("Goal saved: " .. currentGoal)
+        return true
+    end
+
+    local target = args:match("^[Ww][Hh][Ii][Tt][Ee][Ll][Ii][Ss][Tt]%s+(.+)$")
+    if target then
+        local added, message = AddWhitelistIdentifier(target)
+        SendAI(message)
+        return true
+    elseif lower == "whitelist" then
+        SendAI("Use /ai whitelist [Username or DisplayName].")
+        return true
+    end
+
+    local removeTarget = args:match("^[Uu][Nn][Ww][Hh][Ii][Tt][Ee][Ll][Ii][Ss][Tt]%s+(.+)$")
+    if removeTarget then
+        local removed, message = RemoveWhitelistIdentifier(removeTarget)
+        SendAI(message)
+        return true
+    elseif lower == "unwhitelist" then
+        SendAI("Use /ai unwhitelist [Username or DisplayName].")
+        return true
+    end
+
+    return false
+end
+
+local function IsRestrictedCommand(args)
+    local lower = SafeLower(args)
+
+    return lower == "rejoin" or lower == "serverhop"
+        or lower == "esp" or lower == "esp on" or lower == "esp off" or lower == "esp stop"
+        or lower == "explode" or lower == "reset"
+        or lower == "fly" or lower == "fly on" or lower == "fly off" or lower == "fly stop"
+        or lower == "roast" or lower == "sing" or lower:match("^sing%s+") ~= nil
+        or lower == "copychat" or lower:match("^copychat%s+") ~= nil
+        or lower == "goto" or lower:match("^goto%s+") ~= nil
+        or lower == "spin" or lower == "spin on" or lower == "spin off"
+        or lower == "dance" or lower == "dance on" or lower == "dance off"
+        or lower == "dance 1" or lower == "dance 2"
+        or lower == "backflip" or lower == "backflip on"
+        or lower == "float" or lower == "float on" or lower == "float off"
+        or lower == "orbit" or lower == "orbit off" or lower == "orbit stop"
+        or lower:match("^orbit%s+") ~= nil
+        or lower == "animation off" or lower == "stop" or lower == "status"
+        or lower == "autopilot" or lower == "autopilot on" or lower == "autopilot off"
+        or lower == "explore" or lower == "explore on" or lower == "explore off"
+        or lower:match("^goal%s") ~= nil
+        or lower == "speed" or lower:match("^speed%s+") ~= nil
+        or lower == "jump" or lower:match("^jump%s+") ~= nil
+        or lower == "fling" or lower:match("^fling%s+") ~= nil
+        or lower == "whitelist" or lower:match("^whitelist%s") ~= nil
+        or lower == "unwhitelist" or lower:match("^unwhitelist%s") ~= nil
+end
+
+--========================================
+-- CHAT PROCESSING
+--========================================
+
+local function ProcessChat(speaker, rawText)
+    if not speaker or type(rawText) ~= "string" then
+        return
+    end
+
+    local fullText = Trim(rawText)
+    if fullText == "" then
+        return
+    end
+
+    local lowerText = SafeLower(fullText)
+    if not lowerText:match("^/ai%s+") then
+        return
+    end
+
+    -- Keep the original capitalization of the question.
+    local args = Trim(fullText:sub(4))
+    if args == "" then
+        return
+    end
+
+    local isOwner = speaker.UserId == LocalPlayer.UserId
+        and SafeLower(LocalPlayer.Name) == OWNER_USERNAME
+
+    -- Authorize first. Whitelist lookup supports UserId, Username, DisplayName,
+    -- and old username-only saved entries. Unapproved messages are ignored.
+    if not isOwner and not IsWhitelisted(speaker) then
+        return
+    end
+
+    -- Prevent double processing (SendingMessage + MessageReceived + Chatted).
+    -- A short window avoids dropping a user's quick repeated /ai question.
+    local key = tostring(speaker.UserId) .. "|" .. fullText
+    local now = os.clock()
+    if recentlyHandled[key] and (now - recentlyHandled[key]) < 0.9 then
+        return
+    end
+    recentlyHandled[key] = now
+
+    -- Keep this cache small.
+    for oldKey, oldTime in pairs(recentlyHandled) do
+        if now - oldTime > 10 then
+            recentlyHandled[oldKey] = nil
+        end
+    end
+
+    if isOwner then
+        if HandleOwnerCommand(args) then
+            return
+        end
+    else
+        local lowerArgs = SafeLower(args)
+        if lowerArgs == "info" or lowerArgs == "commands" then
+            SendCommandInfo()
+            return
+        end
+
+        if IsRestrictedCommand(args) then
+            SendAI("Only the owner can control me.")
+            return
+        end
+    end
+
+    QueueQuestion(args, speaker)
+end
+
+-- Modern chat: catch the local player's message immediately when they send it.
+pcall(function()
+    TextChatService.SendingMessage:Connect(function(message)
+        if message and type(message.Text) == "string" then
+            local source = message.TextSource
+            if not source or source.UserId == LocalPlayer.UserId then
+                ProcessChat(LocalPlayer, message.Text)
+            end
+        end
+    end)
+end)
+
+-- Modern chat: receive messages from other players and the server echo.
+pcall(function()
+    TextChatService.MessageReceived:Connect(function(message)
+        if not message or not message.TextSource then
+            return
+        end
+
+        local speaker = Players:GetPlayerByUserId(message.TextSource.UserId)
+        if speaker then
+            HandleCopiedChatMessage(speaker, message.Text)
+            ProcessChat(speaker, message.Text)
+        end
+    end)
+end)
+
+-- Legacy chat / executor compatibility fallback. Duplicate events are filtered above.
+local function HookPlayerChat(player)
+    player.Chatted:Connect(function(message)
+        HandleCopiedChatMessage(player, message)
+        ProcessChat(player, message)
+    end)
+end
+
+for _, player in ipairs(Players:GetPlayers()) do
+    HookPlayerChat(player)
+end
+
+Players.PlayerAdded:Connect(HookPlayerChat)
+
+Players.PlayerRemoving:Connect(function(player)
+    if copiedChatTarget == player then
+        copiedChatTarget = nil
+        copiedChatSeen = {}
+        ClearCopiedChatQueue()
+        local channel = GetChatChannel()
+        if channel then
+            pcall(function()
+                channel:DisplaySystemMessage("[AI]: Chat relay stopped because that player left.")
+            end)
+        end
+    end
+end)
+
+--========================================
+-- RESPAWN SUPPORT
+--========================================
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+    StopFly()
+    StopCustomAnimation()
+    task.wait(0.7)
+    BindHitDetection(character)
+
+    if movementActive or spinActive then
+        TakeCameraControl()
+        BindMovementController()
+        local _, humanoid = GetCharacterParts(LocalPlayer)
+        if humanoid then
+            humanoid.AutoRotate = not (spinActive or movementMode == "orbit")
+        end
+    end
+end)
+
+if LocalPlayer.Character then
+    task.spawn(function()
+        BindHitDetection(LocalPlayer.Character)
+    end)
+end
+
+--========================================
+-- STARTUP
+--========================================
+
+print("--------------------------------")
+print("[AI] Loaded successfully")
+print("[AI] Local player: " .. LocalPlayer.Name)
+print("[AI] Owner: " .. OWNER_USERNAME)
+print("[AI] Model: " .. MODEL)
+print("[AI] HTTP available: " .. tostring(type(httpRequest) == "function"))
+print("[AI] Chat channel: " .. tostring(GetChatChannel() ~= nil))
+print("[AI] R15 Backflip candidates: " .. table.concat(BACKFLIP_ANIMATION_IDS, ", "))
+print("[AI] R15 Float ID: " .. FLOAT_ANIMATION_ID)
+print("[AI] R15 Dance 1 ID: " .. DANCE_ANIMATION_IDS[1])
+print("[AI] R15 Dance 2 ID: " .. DANCE_ANIMATION_IDS[2])
+print("[AI] Orbit radius: " .. tostring(ORBIT_RADIUS) .. " studs; default speed: " .. tostring(ORBIT_DEFAULT_SPEED) .. " deg/sec")
+print("[AI] Flight speed: " .. tostring(FLY_SPEED) .. " studs/sec")
+print("[AI] ESP: local player highlights and labels; toggle with /ai esp")
+print("[AI] Teleport commands: /ai rejoin and /ai serverhop")
+print("[AI] Whitelist: /ai whitelist [Username or DisplayName] | /ai unwhitelist [Username or DisplayName]")
+if Trim(AUTOLOAD_URL) == "" then
+    warn("[AI] Set AUTOLOAD_URL to a raw hosted script URL to enable auto-load after teleport.")
+end
+print("[AI] Awareness: on-demand avatar, tools, target-under-crosshair, health, and position")
+print("[AI] Commands and movement initialized")
+print("--------------------------------")
+
+SendAI("Online!")
