@@ -3,7 +3,7 @@
 -- Local client script. Replace the API key placeholder before use.
 --========================================
 
-local API_KEY = "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"
+local API_KEY = "ur groq key here lol"
 -- A hosted copy can stay key-free: the teleport bootstrap restores this local secret.
 pcall(function()
     local shared = _G
